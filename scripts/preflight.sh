@@ -49,10 +49,11 @@ if editor_id=$(detect_kiro_editor_id "$ns"); then
   ok "Kiro editor id: $editor_id"
 else
   note_failure "no Kiro editor definition found in namespace $ns."
-  info "Editors this cluster does offer:"
-  list_editor_ids "$ns" | sed 's/^/      /' >&2 || true
   info "If Kiro is present under a different name, set KIRO_EDITOR_ID explicitly."
 fi
+
+info "Editors offered by this cluster:"
+list_editors "$ns" | sed 's/^/      /' >&2 || true
 
 # --- 3. Known issues --------------------------------------------------------
 # Documented against Dev Spaces 3.26-3.28; see docs/findings.md.
@@ -80,13 +81,13 @@ fi
 # The sample devfile needs a real Universal Developer Image tag. Rather than
 # guess, surface what this cluster actually references.
 
-info "Universal Developer Image tags referenced by this cluster:"
-oc get checluster -n "$ns" -o json 2>/dev/null \
-  | jq -r '.items[0] | [.spec, .status] | .. | strings | select(test("udi|universal-developer"))' 2>/dev/null \
-  | sort -u | sed 's/^/      /' >&2 || true
-oc get configmap -n "$ns" -o json 2>/dev/null \
-  | jq -r '.. | strings | select(test("registry.redhat.io/devspaces/udi"))' 2>/dev/null \
-  | sort -u | head -5 | sed 's/^/      /' >&2 || true
+info "Universal Developer Image (pin one of these in the devfile):"
+udi=$(list_udi_images)
+if [[ -n "$udi" ]]; then
+  sed 's/^/      /' <<<"$udi" >&2
+else
+  warn "could not read UDI images from the operator CSV."
+fi
 
 # --- summary ----------------------------------------------------------------
 

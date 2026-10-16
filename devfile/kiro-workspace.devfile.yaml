@@ -20,8 +20,10 @@ metadata:
 components:
   - name: tooling
     container:
-      # TODO: pin to a tag reported by scripts/preflight.sh
-      image: registry.redhat.io/devspaces/udi-rhel9:latest
+      # Universal Developer Image, pinned by digest. This one is from the
+      # Dev Spaces 3.30.2 operator bundle (devspacesoperator.v3.30.2).
+      # scripts/preflight.sh prints the digests your own cluster references.
+      image: registry.redhat.io/devspaces/udi-rhel9@sha256:6399008ef079cda484724c7d5c8a9729c3d1cadf3b70bc65c6ffe94ced588cfc
       memoryRequest: 1Gi
       memoryLimit: 6Gi
       cpuRequest: 500m

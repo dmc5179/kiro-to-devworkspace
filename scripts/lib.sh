@@ -137,21 +137,37 @@ editor_definition_configmaps() {
     -o name 2>/dev/null || true
 }
 
-# Print every editor id the cluster offers, one per line, as publisher/name/version.
-list_editor_ids() {
-  local ns="$1" cm body
+# Print every editor the cluster offers, one per line, as:
+#   publisher/name/version<TAB>displayName<TAB>tags
+#
+# A single ConfigMap (editors-definitions) holds one devfile per key -- twelve
+# of them on a stock 3.30 install -- so each key must be parsed on its own.
+# Concatenating them yields one unparseable document.
+list_editors() {
+  local ns="$1" cm key body
   while read -r cm; do
     [[ -n "$cm" ]] || continue
-    body=$(oc get "$cm" -n "$ns" -o json 2>/dev/null \
-             | jq -r '.data // {} | to_entries[].value' 2>/dev/null) || continue
-    [[ -n "$body" ]] || continue
-    yaml2json <<<"$body" 2>/dev/null | jq -r '
-      .metadata // {} as $m
-      | ($m.attributes // {}) as $a
-      | select($m.name != null)
-      | "\($a.publisher // "unknown")/\($m.name)/\($a.version // "latest")"
-    ' 2>/dev/null || true
+    while read -r key; do
+      [[ -n "$key" ]] || continue
+      body=$(oc get "$cm" -n "$ns" -o json 2>/dev/null \
+               | jq -r --arg k "$key" '.data[$k]' 2>/dev/null) || continue
+      [[ -n "$body" && "$body" != "null" ]] || continue
+      yaml2json <<<"$body" 2>/dev/null | jq -r '
+        (.metadata // {}) as $m
+        | ($m.attributes // {}) as $a
+        | select($m.name != null)
+        | [ "\($a.publisher // "unknown")/\($m.name)/\($a.version // "latest")",
+            ($m.displayName // $m.name),
+            ((($m.tags // []) | join(",")) // "") ]
+        | @tsv
+      ' 2>/dev/null || true
+    done < <(oc get "$cm" -n "$ns" -o json 2>/dev/null | jq -r '.data // {} | keys[]' 2>/dev/null)
   done < <(editor_definition_configmaps "$ns")
+}
+
+# Just the ids, for callers that do not want the detail.
+list_editor_ids() {
+  list_editors "$1" | cut -f1
 }
 
 detect_kiro_editor_id() {
@@ -163,6 +179,39 @@ detect_kiro_editor_id() {
   id=$(list_editor_ids "$ns" | grep -i kiro | head -1 || true)
   [[ -n "$id" ]] || return 1
   printf '%s' "$id"
+}
+
+# Print the raw editor devfile for a given editor id.
+#   get_editor_devfile <namespace> <publisher/name/version>
+# Matches on the devfile's own metadata.name, not on a substring of the body.
+get_editor_devfile() {
+  local ns="$1" want="$2" cm key body got
+  while read -r cm; do
+    [[ -n "$cm" ]] || continue
+    while read -r key; do
+      [[ -n "$key" ]] || continue
+      body=$(oc get "$cm" -n "$ns" -o json 2>/dev/null \
+               | jq -r --arg k "$key" '.data[$k]' 2>/dev/null) || continue
+      [[ -n "$body" && "$body" != "null" ]] || continue
+      got=$(yaml2json <<<"$body" 2>/dev/null | jq -r '
+        (.metadata // {}) as $m | ($m.attributes // {}) as $a
+        | select($m.name != null)
+        | "\($a.publisher // "unknown")/\($m.name)/\($a.version // "latest")"
+      ' 2>/dev/null) || continue
+      if [[ "$got" == "$want" ]]; then printf '%s' "$body"; return 0; fi
+    done < <(oc get "$cm" -n "$ns" -o json 2>/dev/null | jq -r '.data // {} | keys[]' 2>/dev/null)
+  done < <(editor_definition_configmaps "$ns")
+  return 1
+}
+
+# Universal Developer Image refs, read from the operator CSV's relatedImages
+# (authoritative and digest-pinned) rather than scraped from the CheCluster.
+list_udi_images() {
+  oc get csv -n openshift-operators -o json 2>/dev/null \
+    | jq -r '.items[]
+             | select(.metadata.name | test("devspacesoperator"))
+             | .spec.relatedImages[]?.image // empty' 2>/dev/null \
+    | grep -E 'udi-rhel' | sort -u
 }
 
 # --- workspace --------------------------------------------------------------

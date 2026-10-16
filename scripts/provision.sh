@@ -57,14 +57,8 @@ info "Using editor: $editor_id"
 template_name="${name}-kiro-editor"
 info "Creating DevWorkspaceTemplate $template_name in $user_ns"
 
-editor_devfile=$(
-  while read -r cm; do
-    [[ -n "$cm" ]] || continue
-    body=$(oc get "$cm" -n "$ds_ns" -o json | jq -r '.data | to_entries[].value')
-    if grep -qi kiro <<<"$body"; then printf '%s' "$body"; break; fi
-  done < <(editor_definition_configmaps "$ds_ns")
-)
-[[ -n "$editor_devfile" ]] || die "could not extract the Kiro editor devfile from $ds_ns."
+editor_devfile=$(get_editor_devfile "$ds_ns" "$editor_id") \
+  || die "could not extract the devfile for editor '$editor_id' from $ds_ns."
 
 # The editor devfile's components/commands/events become the template spec.
 # oc accepts JSON, so there is no need to round-trip back to YAML.
