@@ -1,0 +1,7 @@
+# Saved reference material, not part of the project
+*.pdf
+
+# Local environment / credentials
+.env
+*.local
+kubeconfig

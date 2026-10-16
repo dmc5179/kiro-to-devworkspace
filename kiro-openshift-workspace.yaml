@@ -1,0 +1,20 @@
+schemaVersion: 2.2.0
+metadata:
+  name: kiro-openshift-workspace
+components:
+  - name: tooling-container
+    container:
+      image: registry.redhat.io/devspaces/ubi9-tooling:latest
+      memoryLimit: 4Gi
+      mountSources: true
+      endpoints:
+        - name: ssh
+          targetPort: 2222
+          protocol: tcp
+          exposure: internal
+  - name: kiro-agent-runtime
+    container:
+      image: public.ecr.aws/amazonlinux/amazonlinux:2023
+      memoryLimit: 2Gi
+      command: ['/bin/sh', '-c', 'while true; do sleep 30; done']
+

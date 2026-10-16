@@ -1,0 +1,61 @@
+#
+# Workspace definition for use with the Kiro (desktop) (SSH) editor.
+#
+# Deliberately plain: it describes only the development container. The SSH
+# server that Kiro attaches to is injected by Dev Spaces when the Kiro editor
+# definition is applied as a contribution -- it is NOT something you declare
+# here. Do not add an sshd sidecar or a `protocol: tcp` endpoint on 2222; both
+# are redundant and the latter is not routable by the Dev Spaces gateway.
+#
+# IMAGE: replace the placeholder below with a tag that exists on your cluster.
+# `scripts/preflight.sh` prints the Universal Developer Image tags your Dev
+# Spaces instance actually references. Pin a digest or explicit tag; `latest`
+# will drift under you.
+#
+schemaVersion: 2.2.0
+
+metadata:
+  name: kiro-workspace
+
+components:
+  - name: tooling
+    container:
+      # TODO: pin to a tag reported by scripts/preflight.sh
+      image: registry.redhat.io/devspaces/udi-rhel9:latest
+      memoryRequest: 1Gi
+      memoryLimit: 6Gi
+      cpuRequest: 500m
+      cpuLimit: 2000m
+      mountSources: true
+      # HTTP endpoints are routed by the Dev Spaces gateway. Add your app's
+      # ports here; the editor's own SSH plumbing is not your concern.
+      endpoints:
+        - name: http-app
+          targetPort: 8080
+          protocol: http
+          exposure: public
+
+  # Persist the agent's own state across workspace restarts. Without this,
+  # Kiro re-synchronises its remote extension host on every start.
+  - name: kiro-state
+    volume:
+      size: 2Gi
+
+commands:
+  - id: install-deps
+    exec:
+      component: tooling
+      commandLine: 'if [ -f package.json ]; then npm ci; fi'
+      workingDir: ${PROJECT_SOURCE}
+      group:
+        kind: build
+        isDefault: true
+
+# Projects are injected by provision.sh from --repo, so that the same devfile
+# serves any repository. Uncomment to hardcode one:
+#
+# projects:
+#   - name: my-project
+#     git:
+#       remotes:
+#         origin: https://github.com/org/repo.git
