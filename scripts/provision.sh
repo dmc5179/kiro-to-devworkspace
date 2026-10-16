@@ -82,12 +82,22 @@ info "Creating DevWorkspace $name in $user_ns"
 
 project_name=$(basename "${repo%.git}")
 
+# routingClass MUST be "che", not the DevWorkspace Operator default of
+# "basic". The editor's landing page binds to 127.0.0.1:3400, so it is only
+# reachable from inside the pod; Che's routing class injects the per-workspace
+# che-gateway sidecar that fronts it and terminates OAuth. Under "basic" the
+# pod starts and both containers go Ready, but the workspace health check can
+# never reach :3400 and the DevWorkspace fails after 5 minutes.
+#
+# devworkspace-config likewise points the workspace at the Che namespace's
+# configuration rather than the operator defaults.
 workspace=$(yaml2json "$devfile" | jq \
   --arg name "$name" \
   --arg tmpl "$template_name" \
   --arg editor "$editor_id" \
   --arg repo "$repo" \
-  --arg project "$project_name" '
+  --arg project "$project_name" \
+  --arg dsns "$ds_ns" '
   {
     apiVersion: "workspace.devfile.io/v1alpha2",
     kind: "DevWorkspace",
@@ -97,9 +107,17 @@ workspace=$(yaml2json "$devfile" | jq \
     },
     spec: {
       started: true,
+      routingClass: "che",
       contributions: [{name: "editor", kubernetes: {name: $tmpl}}],
       template: {
-        attributes: {"che-editor": $editor},
+        attributes: {
+          "che-editor": $editor,
+          "controller.devfile.io/devworkspace-config": {
+            name: "devworkspace-config",
+            namespace: $dsns
+          },
+          "controller.devfile.io/storage-type": "per-user"
+        },
         projects: [{
           name: $project,
           git: {remotes: {origin: $repo}}
@@ -116,22 +134,24 @@ printf '%s' "$workspace" | oc apply -n "$user_ns" -f - >&2 \
 # --- 3. Wait for it to come up ----------------------------------------------
 
 info "Waiting up to ${timeout}s for $name to reach Running"
-deadline=$(( SECONDS + timeout ))
-phase=""
-while (( SECONDS < deadline )); do
-  phase=$(devworkspace_phase "$user_ns" "$name")
-  case "$phase" in
-    Running) break ;;
-    Failed)
-      oc get devworkspace "$name" -n "$user_ns" \
-        -o jsonpath='{.status.message}{"\n"}' >&2 || true
-      die "workspace entered Failed state."
-      ;;
-  esac
-  sleep 5
-done
 
-[[ "$phase" == "Running" ]] || die "timed out after ${timeout}s in phase '${phase:-unknown}'."
+# Watch for Failed in the background so a doomed start aborts promptly instead
+# of burning the full timeout; oc wait itself can only watch for one value.
+( oc wait --for=jsonpath='{.status.phase}'=Failed "devworkspace/$name" \
+    -n "$user_ns" --timeout="${timeout}s" >/dev/null 2>&1 \
+    && kill -TERM $$ 2>/dev/null ) &
+watcher=$!
+trap 'kill "$watcher" 2>/dev/null || true' EXIT
+
+if ! oc wait --for=jsonpath='{.status.phase}'=Running "devworkspace/$name" \
+       -n "$user_ns" --timeout="${timeout}s" >/dev/null 2>&1; then
+  phase=$(devworkspace_phase "$user_ns" "$name")
+  oc get devworkspace "$name" -n "$user_ns" \
+    -o jsonpath='{.status.message}{"\n"}' >&2 || true
+  die "workspace did not reach Running (phase '${phase:-unknown}')."
+fi
+
+kill "$watcher" 2>/dev/null || true
 ok "DevWorkspace $name is Running"
 
 echo

@@ -82,6 +82,28 @@ Environment variables, all optional:
 | `WORKSPACE_NAME` | `kiro-workspace` | Default `--name` |
 | `KIRO_EDITOR_ID` | discovered from the cluster | Override if discovery picks wrong |
 
+## Cluster prerequisites
+
+Beyond Dev Spaces 3.26+, two cluster-side settings are required. `preflight.sh`
+checks both.
+
+```bash
+# 1. Container build capabilities must be off, or workspace pods are rejected
+#    by SCC admission (SETUID/SETGID/allowPrivilegeEscalation under restricted-v2).
+oc patch checluster devspaces -n openshift-devspaces --type=merge \
+  -p '{"spec":{"devEnvironments":{"disableContainerBuildCapabilities":true}}}'
+
+# 2. The workspace namespace must be owned by the connecting user, or the
+#    friendly /<user>/<workspace>/3400/ URL is not generated.
+oc annotate namespace <ns> che.eclipse.org/username=<user>
+```
+
+> **Known limitation.** `preflight.sh` and `provision.sh` read the CheCluster
+> to discover the Dev Spaces namespace, version, and dashboard URL. Ordinary
+> developers do not have that permission, so today these scripts assume
+> elevated access. Fixing this means accepting `DEVSPACES_NAMESPACE` and the
+> dashboard URL as plain configuration and skipping CheCluster entirely.
+
 ## Troubleshooting
 
 **"Too many authentication failures" after sign-in.** You signed into Kiro with

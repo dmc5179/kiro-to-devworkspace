@@ -58,16 +58,25 @@ list_editors "$ns" | sed 's/^/      /' >&2 || true
 # --- 3. Known issues --------------------------------------------------------
 # Documented against Dev Spaces 3.26-3.28; see docs/findings.md.
 
-# Nested containers break the SSH connection (3.28.1 / 3.28.2 known issues).
-nested=$(oc get checluster -n "$ns" \
-  -o jsonpath='{.items[0].spec.devEnvironments.security.containerSecurityContext}' 2>/dev/null || true)
+# Nested containers break the SSH editors (3.28.1 / 3.28.2 known issues).
+# The field defaults to false (capabilities ENABLED) when unset, so an empty
+# value is just as much a problem as an explicit "false". Observed directly:
+# with it enabled, the workspace pod requests SETUID/SETGID and
+# allowPrivilegeEscalation, and admission rejects it under restricted-v2
+# unless the workspace service account is bound to the container-build SCC.
 disable_container_build=$(oc get checluster -n "$ns" \
   -o jsonpath='{.items[0].spec.devEnvironments.disableContainerBuildCapabilities}' 2>/dev/null || true)
-if [[ "$disable_container_build" == "false" ]]; then
-  warn "container build capabilities (nested containers) are enabled."
-  warn "  Known issue: SSH connection to workspaces fails when nested containers are enabled."
-  warn "  If the Kiro connection hangs, test with them disabled."
+if [[ "$disable_container_build" != "true" ]]; then
+  note_failure "container build capabilities are enabled (disableContainerBuildCapabilities=${disable_container_build:-unset, defaults to false})."
+  warn "  Known issue: SSH connections fail when nested containers are enabled."
+  warn "  Workspace pods will be rejected by SCC admission. Either disable them:"
+  warn "    oc patch checluster devspaces -n $ns --type=merge \\"
+  warn "      -p '{\"spec\":{\"devEnvironments\":{\"disableContainerBuildCapabilities\":true}}}'"
+  warn "  or bind the workspace service account to the container-build SCC."
 fi
+
+nested=$(oc get checluster -n "$ns" \
+  -o jsonpath='{.items[0].spec.devEnvironments.security.containerSecurityContext}' 2>/dev/null || true)
 [[ -n "$nested" ]] && info "containerSecurityContext is customised; review if SSH misbehaves."
 
 # Airgapped clusters cannot install the Kiro remote extension host

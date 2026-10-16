@@ -65,6 +65,69 @@ VS Code and JetBrains. There is **no Red Hat procedure page for Kiro** in 3.30
 — which is why the first pass of this research came back negative. The feature
 is documented in release notes and known issues only.
 
+## Verified on a live cluster (2026-10-16)
+
+Tested against OpenShift 4.22.18 with Dev Spaces 3.30.2. The editor exists and
+a scripted workspace reaches Running with Kiro attached.
+
+```
+che-incubator/che-code-sshd-kiro/latest   Kiro (desktop) (SSH)   ssh,CLI,vscode,Tech-Preview
+```
+
+Editor definition metadata corroborates the AWS blog: `displayName` is exactly
+"Kiro (desktop) (SSH)", provider is "Provided by Amazon", repository is
+`github.com/kirodotdev/Kiro`, and the main endpoint is port 3400 over HTTPS.
+
+### Four requirements that are not obvious
+
+1. **`spec.routingClass: che`** — not the DevWorkspace Operator default of
+   `basic`. The editor's landing page binds to `127.0.0.1:3400`, so it is
+   unreachable from outside the pod. Che's routing class injects the
+   `che-gateway` sidecar that fronts it. Under `basic` the pod starts, both
+   containers go Ready, and the workspace still fails after five minutes with
+   *"failed to progress past step 'Waiting for workspace health check to
+   become available'"*. Nothing in the symptom points at routing.
+
+2. **Container build capabilities must be disabled.** With
+   `disableContainerBuildCapabilities` unset (it defaults to *false*, meaning
+   enabled), the pod requests `SETUID`, `SETGID` and
+   `allowPrivilegeEscalation`, and admission rejects it under `restricted-v2`
+   unless the workspace service account is bound to the `container-build` SCC.
+   This is the concrete form of the documented 3.28 known issue *"SSH
+   connection to workspaces fails when nested containers are enabled"*.
+
+3. **The namespace must be annotated `che.eclipse.org/username`.** In a
+   namespace without it, Che falls back to a URL of the form
+   `/<workspace-id>/<endpoint-name>/3400/`. In a properly owned namespace it
+   produces the `/<user>/<workspace>/3400/` form the blog documents. Read
+   `.status.mainUrl` rather than constructing either.
+
+4. **sshd runs in the development container, not the editor container.**
+   `/tmp/sshd.log` lives in `tooling`, listening on `0.0.0.0:2022`;
+   `che-code-sshd-kiro-page` only serves the `:3400` landing page on loopback.
+   The release notes are right to send you to the dev container.
+
+### Pod composition when it works
+
+| Container | Image | Role |
+|---|---|---|
+| `tooling` | `udi-rhel9` | dev container; runs sshd on 2022 |
+| `che-code-sshd-kiro-page` | `code-sshd-rhel9` | serves `127.0.0.1:3400` |
+| `che-gateway` | traefik + oauth-proxy | fronts 3400, enforces OAuth |
+
+### What could not be verified from a CLI
+
+The `:3400` endpoint returns **HTTP 403 with an oauth-proxy "Log In" page** to
+any non-browser caller, including the workspace owner's bearer token. That is
+correct behaviour, not a defect: the gateway wants an interactive browser OAuth
+session, which is precisely what Kiro performs. Completing the handshake
+requires the actual Kiro desktop client.
+
+Also unverified: the workspace must be reachable by a user who can read the
+CheCluster. An ordinary developer cannot, so `preflight.sh` and `provision.sh`
+currently assume more privilege than a real developer has. See the TODO in
+`README.md`.
+
 ## Not documented anywhere
 
 Treat these as this repository's own engineering, and expect to own breakage:

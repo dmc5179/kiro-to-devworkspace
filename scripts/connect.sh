@@ -40,45 +40,110 @@ pod=$(devworkspace_pod "$user_ns" "$name")
 ok "Pod: $pod"
 
 # --- 2. sshd inside the dev container ---------------------------------------
-# The dev container is the one mounting the project sources.
+#
+# sshd runs in the *development* container, not in the editor's own
+# che-code-sshd-kiro-page container -- the editor container only serves the
+# :3400 landing page. Rather than guess which container is which, search for
+# the log the release notes point at.
 
-dev_container=$(oc get pod "$pod" -n "$user_ns" \
-  -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}' \
-  | grep -v -E '^(che-gateway|che-machine-exec)' | head -1)
-[[ -n "$dev_container" ]] || die "could not identify the development container in $pod."
+containers=$(oc get pod "$pod" -n "$user_ns" \
+  -o jsonpath='{range .spec.containers[*]}{.name}{"\n"}{end}')
 
-if oc exec "$pod" -n "$user_ns" -c "$dev_container" -- \
-     sh -c 'test -f /tmp/sshd.log' 2>/dev/null; then
-  ok "sshd log present at /tmp/sshd.log in container '$dev_container'"
+dev_container=""
+for c in $containers; do
+  if oc exec "$pod" -n "$user_ns" -c "$c" -- test -f /tmp/sshd.log 2>/dev/null; then
+    dev_container="$c"; break
+  fi
+done
+
+if [[ -n "$dev_container" ]]; then
+  ok "sshd log found in container '$dev_container'"
   if oc exec "$pod" -n "$user_ns" -c "$dev_container" -- \
-       sh -c 'grep -qi "error\|fail" /tmp/sshd.log' 2>/dev/null; then
+       grep -qiE 'error|fail' /tmp/sshd.log 2>/dev/null; then
     warn "sshd.log contains error lines:"
     oc exec "$pod" -n "$user_ns" -c "$dev_container" -- \
-      sh -c 'grep -i "error\|fail" /tmp/sshd.log | tail -5' >&2 || true
+      sh -c 'grep -iE "error|fail" /tmp/sshd.log | tail -5' >&2 || true
+  else
+    oc exec "$pod" -n "$user_ns" -c "$dev_container" -- \
+      grep -i 'listening' /tmp/sshd.log 2>/dev/null | sed 's/^/      /' >&2 || true
   fi
 else
-  warn "no /tmp/sshd.log in '$dev_container'."
+  warn "no /tmp/sshd.log in any container (${containers//$'\n'/, })."
   warn "  The editor contribution may not have been applied. Confirm the workspace"
   warn "  was created with the Kiro editor and not a browser editor."
 fi
 
+# The gateway sidecar is what makes the editor reachable from outside the pod.
+if grep -q '^che-gateway$' <<<"$containers"; then
+  ok "che-gateway sidecar present (routingClass=che applied correctly)"
+else
+  warn "no che-gateway sidecar in the pod."
+  warn "  The DevWorkspace probably has routingClass 'basic' instead of 'che'."
+  warn "  The editor binds :3400 to loopback, so without the gateway nothing"
+  warn "  outside the pod can reach it and the health check never passes."
+fi
+
 # --- 3. The :3400 landing page ----------------------------------------------
+#
+# Take the URL from the DevWorkspace's own status rather than assembling one.
+# The AWS blog gives the format as /${USER}/${DEVWORKSPACE_NAME}/3400/, but
+# what Dev Spaces 3.30 actually publishes is
+# /<workspace-id>/<endpoint-name>/3400/. status.mainUrl is authoritative and
+# survives both forms.
 
-dashboard=$(dashboard_url "$ds_ns")
-[[ -n "$dashboard" ]] || die "could not read the dashboard URL from the CheCluster."
+connect_url=$(oc get devworkspace "$name" -n "$user_ns" \
+  -o jsonpath='{.status.mainUrl}' 2>/dev/null || true)
 
-cluster_host="${dashboard#https://}"; cluster_host="${cluster_host%%/*}"
-username=$(oc whoami)
-connect_url="https://${cluster_host}/${username}/${name}/${SSH_LANDING_PORT}/"
+if [[ -z "$connect_url" ]]; then
+  warn "DevWorkspace has no status.mainUrl; falling back to a constructed URL."
+  dashboard=$(dashboard_url "$ds_ns")
+  [[ -n "$dashboard" ]] || die "could not read the dashboard URL from the CheCluster."
+  cluster_host="${dashboard#https://}"; cluster_host="${cluster_host%%/*}"
+  connect_url="https://${cluster_host}/$(oc whoami)/${name}/${SSH_LANDING_PORT}/"
+fi
 
 info "Probing $connect_url"
-code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-         -H "Authorization: Bearer $(oc whoami -t)" "$connect_url" 2>/dev/null || echo 000)
+token=$(oc whoami -t 2>/dev/null || true)
+[[ -n "$token" ]] \
+  || info "no OAuth token for this session (certificate-based login); probing unauthenticated"
+
+# Capture body and status in a single request so the two always agree.
+body_file=$(mktemp)
+trap 'rm -f "$body_file"' EXIT
+if [[ -n "$token" ]]; then
+  code=$(curl -sk -o "$body_file" -w '%{http_code}' --max-time 15 \
+           -H "Authorization: Bearer $token" "$connect_url" 2>/dev/null) || code="000"
+else
+  code=$(curl -sk -o "$body_file" -w '%{http_code}' --max-time 15 "$connect_url" 2>/dev/null) || code="000"
+fi
+
 case "$code" in
-  200|301|302) ok "Remote SSH landing page responded (HTTP $code)" ;;
-  401|403)     warn "landing page returned HTTP $code -- expected; Kiro performs its own OAuth login." ;;
-  000)         warn "could not reach the landing page. Check network access from this host to the cluster." ;;
-  *)           warn "landing page returned HTTP $code." ;;
+  200)
+    ok "Remote SSH landing page responded (HTTP 200)"
+    ;;
+  301|302)
+    ok "landing page redirected (HTTP $code) -- OAuth login, as expected"
+    ;;
+  401|403)
+    # oauth-proxy answers unauthenticated requests with its own login page.
+    # Seeing that page means the gateway is healthy and routing correctly; it
+    # simply wants an interactive browser session, which is what Kiro does.
+    # A bearer token cannot satisfy it, so this is a pass, not a failure.
+    if grep -qi '<title>Log In</title>' "$body_file" 2>/dev/null; then
+      ok "gateway healthy: serving the OAuth login page (HTTP $code)"
+      info "a bearer token cannot complete this flow; Kiro logs in via the browser"
+    else
+      warn "landing page returned HTTP $code without an OAuth login page."
+      warn "  Check that the workspace namespace is annotated che.eclipse.org/username"
+      warn "  with the user you expect to connect as."
+    fi
+    ;;
+  000)
+    warn "could not reach the landing page. Check network access from this host to the cluster."
+    ;;
+  *)
+    warn "landing page returned HTTP $code."
+    ;;
 esac
 
 # --- 4. Hand off to the operator --------------------------------------------
